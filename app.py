@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import time
 import requests
+from io import StringIO
 
 # הגדרות עמוד
 st.set_page_config(page_title="Magic Formula Screener", layout="wide", page_icon="📈")
@@ -14,7 +15,8 @@ def get_sp500_tickers():
     url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
     headers = {'User-Agent': 'Mozilla/5.0'}
     html = requests.get(url, headers=headers).text
-    table = pd.read_html(html)[0]
+    # הנה התיקון: עטפנו את ה-html ב-StringIO
+    table = pd.read_html(StringIO(html))[0]
     filtered = table[~table['GICS Sector'].isin(['Financials', 'Utilities'])]
     return filtered['Symbol'].tolist()
 
