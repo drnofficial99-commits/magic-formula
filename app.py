@@ -1,14 +1,19 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.express as px
 import time
 import requests
 from io import StringIO
 
-# הגדרות עמוד
+# הגדרות עמוד ללא גרפים מיותרים
 st.set_page_config(page_title="Magic Formula Screener", layout="wide", page_icon="📈")
 st.title("📈 Magic Formula Screener")
+
+# ניהול זיכרון כדי שהנתונים לא יימחקו בעצירת הסריקה
+if 'running' not in st.session_state:
+    st.session_state.running = False
+if 'results' not in st.session_state:
+    st.session_state.results = []
 
 @st.cache_data
 def get_sp500_tickers():
@@ -30,7 +35,6 @@ def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
         market_cap = info.get('marketCap', 0)
         if market_cap < min_market_cap: return None
 
-        # משיכת PEG עם גיבוי לשם המשתנה החדש של Yahoo
         peg = info.get('trailingPegRatio') or info.get('pegRatio')
         if max_peg is not None and peg is not None and peg > max_peg:
             return None
@@ -48,9 +52,16 @@ def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
         
         if ev <= 0 or (net_working_capital + net_fixed_assets) <= 0: return None
         
-        # חישוב באחוזים כדי שיהיה נוח בעין
-        earnings_yield = (ebit / ev) * 100
-        roc = (ebit / (net_working_capital + net_fixed_assets)) * 100
+        # אימות נתונים
+        warnings = []
+        if total_debt == 0: warnings.append("ללא חוב")
+        if cash == 0: warnings.append("ללא מזומן")
+        if current_assets == 0: warnings.append("חסר מאזן")
+        validation = "✅ אומת" if not warnings else f"⚠️ הערה: {', '.join(warnings)}"
+        
+        # החזרנו לעשרוני (ללא הכפלה ב-100)
+        earnings_yield = ebit / ev
+        roc = ebit / (net_working_capital + net_fixed_assets)
         
         return {
             'Ticker': ticker_symbol,
@@ -58,102 +69,98 @@ def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
             'Sector': sector,
             'Market Cap ($B)': round(market_cap / 1e9, 2),
             'PEG Ratio': peg,
-            'Earnings Yield (%)': earnings_yield,
-            'ROC (%)': roc
+            'Earnings Yield': earnings_yield,
+            'ROC': roc,
+            'Data Check': validation
         }
     except: return None
 
-# שליפת נתוני הבסיס לטובת המסננים
 all_stock_data = get_sp500_tickers()
 all_sectors = sorted(list(set([item['GICS Sector'] for item in all_stock_data])))
 
-# תפריט צד (Sidebar)
 st.sidebar.header("הגדרות סריקה")
 num_stocks = st.sidebar.slider("כמה מניות לסרוק? (10-500)", 10, 500, 30)
 min_cap = st.sidebar.number_input("שווי שוק מינימלי (במיליארדים)", min_value=1, value=1) * 1e9
 
-st.sidebar.subheader("מסננים מתקדמים")
-selected_sectors = st.sidebar.multiselect("סינון סקטורים (השאר ריק כדי לסרוק הכל)", all_sectors)
+selected_sectors = st.sidebar.multiselect("סינון סקטורים (השאר ריק לסריקת הכל)", all_sectors)
 max_peg_input = st.sidebar.number_input("PEG מקסימלי (השאר 0 ללא סינון)", min_value=0.0, value=0.0, step=0.1)
 max_peg = max_peg_input if max_peg_input > 0 else None
 
-if st.sidebar.button("התחל סריקה 🚀"):
+# כפתורי שליטה
+col1, col2 = st.sidebar.columns(2)
+if col1.button("התחל סריקה 🚀"):
+    st.session_state.running = True
+    st.session_state.results = [] # איפוס תוצאות קודמות
+
+if col2.button("🛑 עצור סריקה"):
+    st.session_state.running = False
+
+# תהליך הסריקה
+if st.session_state.running:
     if selected_sectors:
         tickers_to_run = [item for item in all_stock_data if item['GICS Sector'] in selected_sectors][:num_stocks]
     else:
         tickers_to_run = all_stock_data[:num_stocks]
     
-    results = []
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     if len(tickers_to_run) == 0:
-        st.warning("לא נמצאו מניות התואמות לסינון הסקטורים שבחרת.")
+        st.warning("לא נמצאו מניות התואמות לסינון.")
+        st.session_state.running = False
     else:
         for i, item in enumerate(tickers_to_run):
+            # אם המשתמש לחץ על עצור בזמן הריצה, הלולאה נקטעת
+            if not st.session_state.running:
+                break
+                
             ticker = item['Symbol']
             sector = item['GICS Sector']
-            status_text.text(f"סורק את: {ticker} ({i+1}/{len(tickers_to_run)})")
+            status_text.text(f"סורק את: {ticker} ({i+1}/{len(tickers_to_run)})...")
             
             data = calculate_magic_formula(ticker, sector, min_cap, max_peg)
-            if data: results.append(data)
+            if data: 
+                st.session_state.results.append(data)
             
             progress_bar.progress((i + 1) / len(tickers_to_run))
             time.sleep(1)
             
-        df = pd.DataFrame(results)
-        
-        if not df.empty:
-            df['EY_Rank'] = df['Earnings Yield (%)'].rank(ascending=False)
-            df['ROC_Rank'] = df['ROC (%)'].rank(ascending=False)
-            df['Combined_Score'] = df['EY_Rank'] + df['ROC_Rank']
-            df = df.sort_values('Combined_Score').reset_index(drop=True)
-            
-            status_text.empty()
-            st.success("הסריקה הושלמה בהצלחה! 🎈")
-            st.balloons() # אנימציה קטנה של הצלחה
-            
-            # גרף עמודות אינטראקטיבי - עכשיו צבוע לפי סקטורים!
-            st.subheader("📊 התפלגות המניות המובילות")
-            top_30 = df.head(30)
-            fig = px.bar(
-                top_30, x='Ticker', y='Earnings Yield (%)',
-                hover_name='Company Name', hover_data=['Sector', 'ROC (%)', 'Market Cap ($B)', 'Combined_Score'],
-                color='Sector', # הצבע הוא לפי הסקטור, נותן מראה הרבה יותר חי
-                title='Top Magic Formula Stocks by Sector'
-            )
-            fig.update_layout(template='plotly_dark', xaxis={'categoryorder': 'array', 'categoryarray': top_30['Ticker']})
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # טבלת נתונים עם עיצוב אינטראקטיבי
-            st.subheader("📑 נתונים מלאים")
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Ticker": st.column_config.TextColumn("סימול"),
-                    "Company Name": st.column_config.TextColumn("שם חברה"),
-                    "Sector": st.column_config.TextColumn("סקטור"),
-                    "Market Cap ($B)": st.column_config.NumberColumn("שווי שוק ($B)", format="$%.2f"),
-                    "PEG Ratio": st.column_config.NumberColumn("PEG", format="%.2f"),
-                    "Earnings Yield (%)": st.column_config.NumberColumn("תשואת רווח", format="%.2f%%"),
-                    "ROC (%)": st.column_config.NumberColumn("ROC", format="%.2f%%"),
-                    "Combined_Score": st.column_config.ProgressColumn(
-                        "ציון משולב (נמוך=טוב)",
-                        min_value=0,
-                        max_value=int(df['Combined_Score'].max())
-                    )
-                }
-            )
-            
-            # כפתור הורדה
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 הורד נתונים כקובץ CSV",
-                data=csv,
-                file_name='magic_formula_results.csv',
-                mime='text/csv',
-            )
-        else:
-            st.error("לא נמשכו נתונים (או שכל המניות סוננו החוצה על ידי מסנן ה-PEG/שווי שוק).")
+        st.session_state.running = False
+        status_text.empty()
+        progress_bar.empty()
+        st.success("הסריקה הסתיימה! 🎈")
+
+# תצוגת הטבלה (גם אם הסריקה נעצרה באמצע)
+if len(st.session_state.results) > 0 and not st.session_state.running:
+    df = pd.DataFrame(st.session_state.results)
+    
+    df['EY_Rank'] = df['Earnings Yield'].rank(ascending=False)
+    df['ROC_Rank'] = df['ROC'].rank(ascending=False)
+    df['Combined_Score'] = df['EY_Rank'] + df['ROC_Rank']
+    df = df.sort_values('Combined_Score').reset_index(drop=True)
+    
+    st.subheader("📑 תוצאות נוסחת הקסם (Data Board)")
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Ticker": st.column_config.TextColumn("סימול"),
+            "Company Name": st.column_config.TextColumn("שם חברה"),
+            "Sector": st.column_config.TextColumn("סקטור"),
+            "Market Cap ($B)": st.column_config.NumberColumn("שווי שוק ($B)", format="$%.2f"),
+            "PEG Ratio": st.column_config.NumberColumn("PEG", format="%.2f"),
+            "Earnings Yield": st.column_config.NumberColumn("תשואת רווח (EY)", format="%.4f"),
+            "ROC": st.column_config.NumberColumn("ROC", format="%.4f"),
+            "Data Check": st.column_config.TextColumn("אימות נתונים"),
+            "Combined_Score": st.column_config.NumberColumn("ציון משולב (נמוך=טוב)", format="%d")
+        }
+    )
+    
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 הורד נתונים כקובץ CSV",
+        data=csv,
+        file_name='magic_formula_results.csv',
+        mime='text/csv',
+    )
