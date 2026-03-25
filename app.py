@@ -52,14 +52,6 @@ def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
         
         if ev <= 0 or (net_working_capital + net_fixed_assets) <= 0: return None
         
-        # אימות נתונים
-        warnings = []
-        if total_debt == 0: warnings.append("ללא חוב")
-        if cash == 0: warnings.append("ללא מזומן")
-        if current_assets == 0: warnings.append("חסר מאזן")
-        validation = "✅ אומת" if not warnings else f"⚠️ הערה: {', '.join(warnings)}"
-        
-        # החזרנו לעשרוני (ללא הכפלה ב-100)
         earnings_yield = ebit / ev
         roc = ebit / (net_working_capital + net_fixed_assets)
         
@@ -70,8 +62,7 @@ def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
             'Market Cap ($B)': round(market_cap / 1e9, 2),
             'PEG Ratio': peg,
             'Earnings Yield': earnings_yield,
-            'ROC': roc,
-            'Data Check': validation
+            'ROC': roc
         }
     except: return None
 
@@ -110,7 +101,6 @@ if st.session_state.running:
         st.session_state.running = False
     else:
         for i, item in enumerate(tickers_to_run):
-            # אם המשתמש לחץ על עצור בזמן הריצה, הלולאה נקטעת
             if not st.session_state.running:
                 break
                 
@@ -130,7 +120,7 @@ if st.session_state.running:
         progress_bar.empty()
         st.success("הסריקה הסתיימה! 🎈")
 
-# תצוגת הטבלה (גם אם הסריקה נעצרה באמצע)
+# תצוגת הטבלה
 if len(st.session_state.results) > 0 and not st.session_state.running:
     df = pd.DataFrame(st.session_state.results)
     
@@ -152,7 +142,6 @@ if len(st.session_state.results) > 0 and not st.session_state.running:
             "PEG Ratio": st.column_config.NumberColumn("PEG", format="%.2f"),
             "Earnings Yield": st.column_config.NumberColumn("תשואת רווח (EY)", format="%.4f"),
             "ROC": st.column_config.NumberColumn("ROC", format="%.4f"),
-            "Data Check": st.column_config.TextColumn("אימות נתונים"),
             "Combined_Score": st.column_config.NumberColumn("ציון משולב (נמוך=טוב)", format="%d")
         }
     )
