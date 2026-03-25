@@ -17,7 +17,6 @@ def get_sp500_tickers():
     html = requests.get(url, headers=headers).text
     table = pd.read_html(StringIO(html))[0]
     filtered = table[~table['GICS Sector'].isin(['Financials', 'Utilities'])]
-    # מחזיר רשימה של מילונים עם הטיקר והסקטור
     return filtered[['Symbol', 'GICS Sector']].to_dict('records')
 
 def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
@@ -31,8 +30,8 @@ def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
         market_cap = info.get('marketCap', 0)
         if market_cap < min_market_cap: return None
 
-        # משיכת PEG וסינון במידת הצורך
-        peg = info.get('pegRatio')
+        # משיכת PEG עם גיבוי לשם המשתנה החדש של Yahoo
+        peg = info.get('trailingPegRatio') or info.get('pegRatio')
         if max_peg is not None and peg is not None and peg > max_peg:
             return None
 
@@ -49,14 +48,18 @@ def calculate_magic_formula(ticker_symbol, sector, min_market_cap, max_peg):
         
         if ev <= 0 or (net_working_capital + net_fixed_assets) <= 0: return None
         
+        # חישוב באחוזים כדי שיהיה נוח בעין
+        earnings_yield = (ebit / ev) * 100
+        roc = (ebit / (net_working_capital + net_fixed_assets)) * 100
+        
         return {
             'Ticker': ticker_symbol,
             'Company Name': info.get('shortName', ticker_symbol),
             'Sector': sector,
             'Market Cap ($B)': round(market_cap / 1e9, 2),
             'PEG Ratio': peg,
-            'Earnings Yield': ebit / ev,
-            'ROC': ebit / (net_working_capital + net_fixed_assets)
+            'Earnings Yield (%)': earnings_yield,
+            'ROC (%)': roc
         }
     except: return None
 
@@ -75,7 +78,6 @@ max_peg_input = st.sidebar.number_input("PEG מקסימלי (השאר 0 ללא �
 max_peg = max_peg_input if max_peg_input > 0 else None
 
 if st.sidebar.button("התחל סריקה 🚀"):
-    # סינון הטיקרים לפי הסקטורים שנבחרו (אם נבחרו)
     if selected_sectors:
         tickers_to_run = [item for item in all_stock_data if item['GICS Sector'] in selected_sectors][:num_stocks]
     else:
@@ -102,15 +104,48 @@ if st.sidebar.button("התחל סריקה 🚀"):
         df = pd.DataFrame(results)
         
         if not df.empty:
-            df['EY_Rank'] = df['Earnings Yield'].rank(ascending=False)
-            df['ROC_Rank'] = df['ROC'].rank(ascending=False)
+            df['EY_Rank'] = df['Earnings Yield (%)'].rank(ascending=False)
+            df['ROC_Rank'] = df['ROC (%)'].rank(ascending=False)
             df['Combined_Score'] = df['EY_Rank'] + df['ROC_Rank']
             df = df.sort_values('Combined_Score').reset_index(drop=True)
             
-            st.success("הסריקה הושלמה בהצלחה!")
+            status_text.empty()
+            st.success("הסריקה הושלמה בהצלחה! 🎈")
+            st.balloons() # אנימציה קטנה של הצלחה
             
-            # טבלת נתונים מעודכנת עם הסקטור וה-PEG
-            st.dataframe(df, use_container_width=True)
+            # גרף עמודות אינטראקטיבי - עכשיו צבוע לפי סקטורים!
+            st.subheader("📊 התפלגות המניות המובילות")
+            top_30 = df.head(30)
+            fig = px.bar(
+                top_30, x='Ticker', y='Earnings Yield (%)',
+                hover_name='Company Name', hover_data=['Sector', 'ROC (%)', 'Market Cap ($B)', 'Combined_Score'],
+                color='Sector', # הצבע הוא לפי הסקטור, נותן מראה הרבה יותר חי
+                title='Top Magic Formula Stocks by Sector'
+            )
+            fig.update_layout(template='plotly_dark', xaxis={'categoryorder': 'array', 'categoryarray': top_30['Ticker']})
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # טבלת נתונים עם עיצוב אינטראקטיבי
+            st.subheader("📑 נתונים מלאים")
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Ticker": st.column_config.TextColumn("סימול"),
+                    "Company Name": st.column_config.TextColumn("שם חברה"),
+                    "Sector": st.column_config.TextColumn("סקטור"),
+                    "Market Cap ($B)": st.column_config.NumberColumn("שווי שוק ($B)", format="$%.2f"),
+                    "PEG Ratio": st.column_config.NumberColumn("PEG", format="%.2f"),
+                    "Earnings Yield (%)": st.column_config.NumberColumn("תשואת רווח", format="%.2f%%"),
+                    "ROC (%)": st.column_config.NumberColumn("ROC", format="%.2f%%"),
+                    "Combined_Score": st.column_config.ProgressColumn(
+                        "ציון משולב (נמוך=טוב)",
+                        min_value=0,
+                        max_value=int(df['Combined_Score'].max())
+                    )
+                }
+            )
             
             # כפתור הורדה
             csv = df.to_csv(index=False).encode('utf-8')
